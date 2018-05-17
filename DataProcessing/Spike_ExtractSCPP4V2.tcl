@@ -1,3 +1,4 @@
+# Written by Kevan Hashemi Opensource Instruments
 LWDAQ_print $t "Asking for input file list..."
 set fnl [LWDAQ_get_file_name 1]
 set data [list]
