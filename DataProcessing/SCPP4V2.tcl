@@ -1,3 +1,4 @@
+# Written by Kevan Hashemi: http://www.opensourceinstruments.com/Electronics/A3018/Seizure_Detection.html
 # Spike Count and Power Processor
 #
 # This processor produces characteristics containing the channel number,
