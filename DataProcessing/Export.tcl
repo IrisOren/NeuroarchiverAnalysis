@@ -1,3 +1,4 @@
+#Written by Kevan Hashemi: http://www.opensourceinstruments.com/Electronics/A3018/Seizure_Detection.html#Exporting%20Data
 set fn [file join [file dirname $config(play_file)] \
   "E$info(channel_num)\.txt"]
 set export_string ""
