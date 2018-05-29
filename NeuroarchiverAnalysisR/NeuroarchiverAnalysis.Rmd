@@ -1,0 +1,1106 @@
+
+---
+title: ""
+author: ""
+date: "`r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document: 
+    df_print: paged
+  pdf_document: default
+---
+
+
+# Description {.tabset}
+This file reports the analysis of the output data acquired from processing rodent EEG data using the SCPP4V2 processor.
+
+SCPP4V2 has been optimised to run on 8s intervals and the files in the NeuroarchiverAnalysis repository specify this interval length. The glitch threshold is set to 200
+    
+For each data file (.ndf), SCPP4V2 generates a text file, containing: loss| spike counts| burst count| delta power (0.1 - 3.9 Hz)| theta power (4 - 12Hz) | gamma1 power (20-80 Hz, based on Verret et al 2016) | gamma2 power (40-80 Hz)| broadband1 power (5- 160Hz; to avoid low frequency power arising from artifacts)| broadband2 power (0.1 - 160Hz). Each row is a consecutive 8s interval. 
+
+The present analysis takes input of files "ndfFilename_SCPP4V2.txt", organised in individual folders by AnimalID. 
+
+Other input files: 
+
+* Data/RecordingInformation.csv: Contains variables, Genotype, FalsePositive (between 0 - 1. If not assessed, set to 0)  
+* Data/VideoScoring/: A folder containing individual csv files with video scoring data for each animal. See Data/VideoScoringREADME.csv for file structure  
+
+Outputs:
+The following csv files are saved and can be used for futher stats
+
+* Output/DataframeAll.csv: compiled table of all animals and all intervals, after applying exclusion criteria  
+* Output/Summary.csv: Summary data of spectral power, Mean SpikeAndBurstCount and Grtr0Spikes (proportion of intervals with >1 spike) for each animal  
+* Output/SpectralPowerSummaryBroadband1.csv: Summary data of spectral power normalised by Broadband1 for each animal  
+* Output/SpectralPowerSummaryBroadband2.csv: Summary data of spectral power normalised by Broadband2 for each animal  
+* Output/ECDFAllThetaOverDelta.csv: The data used for cumulative distribution plots of theta/delta  
+* Output/ECDFAllSpikes.csv: The data used for cumulative distribution plots of spikes  
+* Output/DataframeVideoTimesAll.csv: Subset of DataframeAll with video scored behavioural classification  
+* Output/SummarySW.csv: Summary of spectral power (unnormalised) and SpikeAndBurst count for each animal separated by behavioural state and genotype  
+
+Plots are saved to Outputs/Figures
+
+##Housekeeping
+
+First, load packages and source files
+```{r LoadPackages_Chunk, echo=FALSE}
+suppressMessages(library(lubridate))
+suppressMessages(library(plyr))
+suppressMessages(library(Rmisc))
+suppressMessages(library(lazyeval)) #Needed for using ggplot2 library
+suppressMessages(library(ggplot2))
+suppressMessages(library(data.table))
+suppressMessages(library(perm))
+suppressMessages(library(circular))
+suppressMessages(library(plotrix))
+suppressMessages(library(cowplot))#for plot_grid
+suppressMessages(library(readr))  #for col_skip in read.csv
+suppressMessages(library(lme4))
+suppressMessages(library(lsmeans))
+suppressMessages(library(multcomp))
+suppressMessages(library(CircOutlier))
+suppressMessages(library(dplyr))
+suppressMessages(library(gmodels))
+suppressMessages(library(stringr))
+
+
+sourceDir <- function(path, trace = TRUE, ...) {
+    for (nm in list.files(path, pattern = "\\.[Rr]$")) {
+       if(trace) cat(nm,":")           
+       source(file.path(path, nm), ...)
+       if(trace) cat("\n")
+    }
+}
+sourceDir("R/")  #Source all functions in R/ folder relative to project
+```
+
+
+Specify files and folders to be used
+```{r VariableInitialisationChunk}
+NDFDataParentFolder<-"C:/Users/ioren/Dropbox/Analysis/Neuroarchiver/CDKL5/CDKL5_SCPP4V2"  #SPECIFY THE PARENT DIRECTORY OF THE SCPP4V2 PROCESSOR OUTPUT FILES
+RecordingInfoFile<-"./Data/RecordingInfo.csv"
+OutputFolder<-"./Output"  #Folder where analysis outputs are saved
+```
+
+Set thresholds and variables
+```{r SetThresholdChunk}
+FalsePositiveCutOff=0.1  #Threshold for excluding animal based on high false positive rate. Between 0-1
+LossIntervalPercentageThreshold<-5 #Limit for percent of intervals lost to include animal in analysis in %
+LossThreshold<-20  #Threshold for packet loss within an interval for exclusion
+DeltaThreshold<-1000  #Threshold for delta power within an interval for exclusion. Units: Counts
+
+LightsOn<-7
+LightsOff<-19
+
+```
+
+Import summary recording information dataframe as SummaryDataframe
+```{r ImportRecordingInformation, echo=FALSE}
+detach("package:dplyr", character.only = TRUE)
+library("dplyr", character.only = TRUE)
+SummaryDataframe<-read.csv(RecordingInfoFile, na = "empty")
+SummaryDataframe$AnimalID<-as.character(SummaryDataframe$AnimalID)
+#SummaryDataframe<-filter(SummaryDataframe, FalsePositive<FalsePositiveCutOff)
+```
+
+The dataset used in analysis is from the following animals
+```{r}
+SummaryDataframe
+```
+
+If Output/DataframeAll.csv does not exist, we import data for each 8s interval for all animal IDs to create DataframeAll that is used in all analysis. Else, we import DataframeAll into the workspace. If you want to reimport data, then delete Output/DataframeAll.csv
+
+```{r ImportAndTransformNDFOutput_chunk, echo=FALSE}
+if(file.exists("./Output/DataframeAll.csv")){
+  DataframeAll<-read.csv("./Output/DataframeAll.csv")
+  RemoveOption<-0
+  } else{  #Else create DataframeAll.csv
+      DataframeAll<-data.frame()
+      for(i in 1:nrow(SummaryDataframe)){     #Loop through animals
+        Dataframe<-data.frame() #Initialise dataframe for current animal
+        #Write AnimalID, genotype and TimeZone to variable for current animal
+        AnimalIDCurrent<-SummaryDataframe$AnimalID[i]
+        GenotypeCurrent<-SummaryDataframe$Genotype[i]
+        TimeZoneCurrent<-"Europe/london"
+        #i. Set AnimalID subfolder
+        FullPath<-paste(NDFDataParentFolder, AnimalIDCurrent, sep="/")
+        FullPath<-paste(FullPath, "/", sep="")
+        #Next import all files in input_path to create a new r dataframe called             `Dataframe'
+        Dataframe<-ImportData(FullPath)
+        # Add Variable for ExcludeInterval: If Loss>LossThreshold or  delta power >DeltaThreshold
+          
+        ExcludedIntervalsVariable<-which((Dataframe$Loss>LossThreshold)| (Dataframe$Delta>DeltaThreshold))
+        #Set ExcludeInterval to a default of 0
+        Dataframe$ExcludeInterval<-0
+        #ExcludeInterval<-1 for exclusion
+        Dataframe$ExcludeInterval[ExcludedIntervalsVariable]<-1
+        
+        #Apend time information to Data frame  
+        Dataframe <- GetTimeOfDayAndDate(Dataframe, TimeZoneCurrent)
+        Dataframe$TimeOfDay<-as.POSIXct(Dataframe$TimeOfDay)
+        
+        #Apend AnimalID variable and Genotype
+        AnimalIDVariable<-rep(AnimalIDCurrent, nrow(Dataframe))
+        Dataframe<-cbind(Dataframe, AnimalIDVariable)
+        Genotype<-rep(GenotypeCurrent, nrow(Dataframe))
+        Dataframe<-cbind(Dataframe, Genotype)
+      
+       #Apend Dataframe to DataframeAll. To access an animal, used "filter()" 
+        DataframeAll<-rbind(DataframeAll, Dataframe)
+      }  #Close loop across animals
+  
+    #Add LightDark variable where LightDark=TRUE is lights on
+    Hour<-hour(DataframeAll$TimeOfDay)
+    DataframeAll$LightDark <- Hour %in% seq(LightsOn, LightsOff-1)
+    
+    #Add ThetaOverDelta
+    DataframeAll$ThetaOverDelta<-DataframeAll$Theta/DataframeAll$Delta
+    
+    #Calculate Spike and Burst count
+    DataframeAll$SpikeAndBurstCount<-DataframeAll$Spike+DataframeAll$Burst
+    
+    
+    #Exclude loss and artifact intervals
+    DataframeAll<-filter(DataframeAll, ExcludeInterval==0)
+    
+    #Write to Output/DataframeAll.csv
+    write.csv(DataframeAll,"./Output/DataframeAll.csv")
+    
+    RemoveOption<-1
+    }
+
+if(RemoveOption==1){
+    rm(Dataframe,   Genotype)
+}
+```
+
+
+
+Normalise by broadband power.. We use two normalisations. Median of Broadband1=5-160Hz, Broadband2=0.1-160Hz.Broadband1 normalisation will avoid contamination arising from artifacts
+
+```{r NormaliseByBroadband, echo=FALSE, include=TRUE}
+#Get median of broadband1 and broadband2 power per animal
+DataframeAll$MedianBroadbandPower1<-ave(DataframeAll$Broadband1, DataframeAll$AnimalIDVariable, FUN=function(x) median(x, na.rm=TRUE))
+
+DataframeAll$MedianBroadbandPower2<-ave(DataframeAll$Broadband2, DataframeAll$AnimalIDVariable, FUN=function(x) median(x, na.rm=TRUE))
+
+DataframeAll<-mutate(DataframeAll,
+  DeltaNorm1 = Delta/MedianBroadbandPower1,
+  DeltaNorm2 = Delta/MedianBroadbandPower2,
+  ThetaNorm1 = Theta/MedianBroadbandPower1,
+  ThetaNorm2 = Theta/MedianBroadbandPower2,
+  Gamma1Norm1 = Gamma1/MedianBroadbandPower1,
+  Gamma1Norm2 = Gamma1/MedianBroadbandPower2,
+  Gamma2Norm1 = Gamma2/MedianBroadbandPower1,
+  Gamma2Norm2 = Gamma2/MedianBroadbandPower2
+)
+
+```
+
+```{r, echo=FALSE}
+#Set colours for plotting
+Colors=c("darkgreen", "grey56")
+```
+
+The genotypes used
+```{r, GetGenotypesChunk, echo=FALSE}
+Genotypes<-unique(SummaryDataframe$Genotype)
+
+Genotypes
+
+```
+## Example traces {.tabset}
+We can plot example traces which have been exported using the neuroarchiver Export.tcl. The following chunks plot traces which have been manually identified as sleep and wake. If included, change the value of "include =FALSE" to "TRUE", and specify the filenames to be used.   The chunks below are for 2 genotypes. Can be copied to add more genotypes.
+
+```{r}
+IncludeExampleTraces=TRUE
+```
+### `r Genotypes[1]`
+
+```{r, eval=IncludeExampleTraces, echo=FALSE}
+Filename1<-"./Data/M1503139415/CDKL5_345_Wake_Tmin2136.txt" #Transmitter27
+
+Trace1<-read.csv(Filename1, header = FALSE)
+Trace1<-Trace1*400*10^(-6)  #Data scaling for A3028B transmitter
+
+Filename2<-"./Data/M1503139415/CDKL5_345_SWS_Tmin1936.txt" #Transmitter27
+
+Trace2<-read.csv(Filename2, header = FALSE)
+Trace2<-Trace2*400*10^(-6)
+
+Filename3<-"./Data/M1503139415/CDKL5_345_REM_Tmin2200.txt" #Transmitter27
+
+Trace3<-read.csv(Filename3, header = FALSE)
+Trace3<-Trace3*400*10^(-6)
+
+Traces<-data.frame(c(Trace1, Trace2, Trace3))
+names(Traces)<-c("i. Wake", "ii.Sleep", "iii.Sleep")
+
+Traces$Time<-seq(from=0,to=((nrow(Traces)-1)/512), by=1/512)
+
+#MaxSpan<-max(c((max1-min1), (max2-min2), (max3-min3)))
+
+Traces.melted<-melt(Traces, id="Time")
+
+Plot<-ggplot(data = Traces.melted, aes(x = Time, y = value))+
+    geom_line(color=Colors[2])+
+  facet_grid(variable~.)+
+  scale_y_continuous(limits=c(17.6, 18.15))+
+  geom_segment(x=0, xend=1, y=17.6, yend=17.6)+ #1s
+  geom_segment(x=0, xend=0, y=17.6, yend=17.7) +  #100microV
+  theme_bw()+
+  theme(axis.title.x = element_blank(),
+         axis.text.x = element_blank(),
+         axis.ticks.x = element_blank(),
+         axis.line.x = element_blank(),
+         axis.title.y = element_blank(),
+         axis.text.y = element_blank(),
+         axis.ticks.y = element_blank(),
+         axis.line.y = element_blank(),
+         panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank(),
+         panel.border = element_blank())
+Plot
+
+ggsave("Output/Figures/CDKL5_345_tracesWT.pdf",width=12,height=10, units="cm", device="pdf")
+```
+
+
+### `r Genotypes[2]`
+
+```{r, eval=IncludeExampleTraces, echo=FALSE}
+Filename1<-"./Data/M1503139415/CDKL5_357_Wake_Tmin2320.txt" #Transmitter27
+
+Trace1<-read.csv(Filename1, header = FALSE)
+Trace1<-Trace1*400*10^(-6)
+
+Filename2<-"./Data/M1503139415/CDKL5_357_SWS_Tmin2664.txt" #Transmitter27
+
+Trace2<-read.csv(Filename2, header = FALSE)
+Trace2<-Trace2*400*10^(-6)
+
+Filename3<-"./Data/M1503139415/CDKL5_357_REM_Tmin2960.txt" #Transmitter27
+
+Trace3<-read.csv(Filename3, header = FALSE)
+Trace3<-Trace3*400*10^(-6)
+
+Traces<-data.frame(c(Trace1, Trace2, Trace3))
+names(Traces)<-c("i. Wake", "ii.Sleep", "iii.Sleep")
+
+Traces$Time<-seq(from=0,to=((nrow(Traces)-1)/512), by=1/512)
+
+#MaxSpan<-max(c((max1-min1), (max2-min2), (max3-min3)))
+
+Traces.melted<-melt(Traces, id="Time")
+
+Plot<-ggplot(data = Traces.melted, aes(x = Time, y = value))+
+    geom_line(color=Colors[1])+
+  facet_grid(variable~.)+
+  scale_y_continuous(limits=c(17.5, 18.05))+
+  geom_segment(x=0, xend=1, y=17.5, yend=17.5)+ #1s
+  geom_segment(x=0, xend=0, y=17.5, yend=17.6) +  #100microV
+  theme_bw()+
+  theme(axis.title.x = element_blank(),
+         axis.text.x = element_blank(),
+         axis.ticks.x = element_blank(),
+         axis.line.x = element_blank(),
+         axis.title.y = element_blank(),
+         axis.text.y = element_blank(),
+         axis.ticks.y = element_blank(),
+         axis.line.y = element_blank(),
+         panel.grid.major = element_blank(),
+         panel.grid.minor = element_blank(),
+         panel.border = element_blank())
+Plot
+
+ggsave("Output/Figures/CDKL5_357_tracesCDKL5.pdf",width=12,height=10, units="cm", device="pdf")
+```
+
+
+## Analysis of spectral features and spikes across recording
+
+### Summary data {.tabset}
+
+#### Unnormalised powers and SpikeAndBurstCount
+
+```{r Grouped, include=TRUE, echo=FALSE}
+Grouped<-dplyr::group_by(DataframeAll, AnimalIDVariable, Genotype)
+#Compute the summary statistics for spectral power for each animal for normalisation by Broadband1 and Broadband2           
+Summary<-dplyr::summarise(Grouped,
+                            num=n(),
+                     MeanTheta=mean(Theta),
+                     SEMTheta=sd(Theta)/sqrt(n()),
+                     CI_LTheta=CI(Theta)[1],
+                     CI_UTheta=CI(Theta)[3], 
+                     MeanDelta=mean(Delta),
+                     SEMDelta=sd(Delta)/sqrt(n()),
+                     CI_LDelta=CI(Delta)[1],
+                     CI_UDelta=CI(Delta)[3], 
+                     MeanGamma1=mean(Gamma1),
+                     SEMGamma1=sd(Gamma1)/sqrt(n()),
+                     CI_LGamma1=CI(Gamma1)[1],
+                     CI_UGamma1=CI(Gamma1)[3], 
+                     MeanGamma2=mean(Gamma2),
+                     SEMGamma2=sd(Gamma2)/sqrt(n()),
+                     CI_LGamma2=CI(Gamma2)[1],
+                     CI_UGamma2=CI(Gamma2)[3], 
+                     MeanThetaOverDelta=mean(ThetaOverDelta, na.rm=TRUE),
+                     SEMThetaOverDelta=sd(ThetaOverDelta, na.rm=TRUE)/sqrt(n()),
+                     CI_LThetaOverDelta=ci(ThetaOverDelta, na.rm=TRUE)[1],
+                     CI_UThetaOverDelta=ci(ThetaOverDelta, na.rm=TRUE)[3], 
+                     MeanSpikeAndBurst=mean(SpikeAndBurstCount),
+                     SEMSpikeAndBurst=sd(SpikeAndBurstCount)/sqrt(n()), 
+                     CI_LSpikeAndBurst=CI(SpikeAndBurstCount)[1], 
+                     CI_USpikeAndBurst=CI(SpikeAndBurstCount)[3])
+
+Summary
+
+
+```
+
+
+#### Normalised by broadband 1
+
+```{r, Grouped_Broadband1, include=TRUE, echo=FALSE}
+
+Grouped<-dplyr::group_by(DataframeAll, AnimalIDVariable, Genotype)
+#Compute the summary statistics for spectral power for each animal for normalisation by Broadband1 and Broadband2           
+SummaryNorm1<-dplyr::summarise(Grouped,
+                            num=n(),
+                     MeanThetaNorm1=mean(ThetaNorm1),
+                     SEMThetaNorm1=sd(ThetaNorm1)/sqrt(n()),
+                     CI_LThetaNorm1=CI(ThetaNorm1)[1],
+                     CI_UThetaNorm1=CI(ThetaNorm1)[3], 
+                     MeanDeltaNorm1=mean(DeltaNorm1),
+                     SEMDeltaNorm1=sd(DeltaNorm1)/sqrt(n()),
+                     CI_LDeltaNorm1=CI(DeltaNorm1)[1],
+                     CI_UDeltaNorm1=CI(DeltaNorm1)[3], 
+                     MeanGamma1Norm1=mean(Gamma1Norm1),
+                     SEMGamma1Norm1=sd(Gamma1Norm1)/sqrt(n()),
+                     CI_LGamma1Norm1=CI(Gamma1Norm1)[1],
+                     CI_UGamma1Norm1=CI(Gamma1Norm1)[3], 
+                     MeanGamma2Norm1=mean(Gamma2Norm1),
+                     SEMGamma2Norm1=sd(Gamma2Norm1)/sqrt(n()),
+                     CI_LGamma2Norm1=CI(Gamma2Norm1)[1],
+                     CI_UGamma2Norm1=CI(Gamma2Norm1)[3])
+                     
+
+SummaryNorm1
+
+
+```
+                     
+
+#### Normalised by broadband 2
+
+```{r, Grouped_Broadband2, include=TRUE, echo=FALSE}
+SummaryNorm2<-dplyr::summarise(Grouped,
+                            num=n(),
+                     MeanThetaNorm2=mean(ThetaNorm2),
+                     SEMThetaNorm2=sd(ThetaNorm2)/sqrt(n()),
+                     CI_LThetaNorm2=CI(ThetaNorm2)[1],
+                     CI_UThetaNorm2=CI(ThetaNorm2)[3], 
+                     MeanDeltaNorm2=mean(DeltaNorm2),
+                     SEMDeltaNorm2=sd(DeltaNorm2)/sqrt(n()),
+                     CI_LDeltaNorm2=CI(DeltaNorm2)[1],
+                     CI_UDeltaNorm2=CI(DeltaNorm2)[3], 
+                     MeanGamma1Norm2=mean(Gamma1Norm2),
+                     SEMGamma1Norm2=sd(Gamma1Norm2)/sqrt(n()),
+                     CI_LGamma1Norm2=CI(Gamma1Norm2)[1],
+                     CI_UGamma1Norm2=CI(Gamma1Norm2)[3], 
+                     MeanGamma2Norm2=mean(Gamma2Norm2),
+                     SEMGamma2Norm2=sd(Gamma2Norm2)/sqrt(n()),
+                     CI_LGamma2Norm2=CI(Gamma2Norm2)[1],
+                     CI_UGamma2Norm2=CI(Gamma2Norm2)[3])
+
+SummaryNorm2
+
+                   
+
+```
+
+### Plots {.tabset}
+
+#### Delta power
+
+Mean delta power per animal unnormalised. Error bars=95% CI
+```{r DeltaPlot, echo=FALSE}
+
+PlotDelta<-ggplot(Summary, 
+               aes(x=Genotype, 
+                   y=MeanDelta)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LDelta, ymax=CI_UDelta, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Delta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotDelta
+
+ggsave("Output/Figures/Delta.pdf", device="pdf")  #Save plot to Output/Figures folder
+```
+
+
+Mean delta power per animal normalised by Broadband1. Error bars=95% CI
+```{r DeltaPlot1, echo=FALSE}
+
+PlotDelta1<-ggplot(SummaryNorm1, 
+               aes(x=Genotype, 
+                   y=MeanDeltaNorm1)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LDeltaNorm1, ymax=CI_UDeltaNorm1, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Delta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotDelta1
+
+ggsave("Output/Figures/DeltaNorm1.pdf", device="pdf")
+
+
+
+
+```
+
+Mean delta power per animal normalised by Broadband2. Error bars=95% CI
+```{r DeltaPlot2,  echo=FALSE}
+
+PlotDelta2<-ggplot(SummaryNorm2, 
+               aes(x=Genotype, 
+                   y=MeanDeltaNorm2)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LDeltaNorm2, ymax=CI_UDeltaNorm2, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Delta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotDelta2
+
+ggsave("Output/Figures/DeltaNorm2.pdf", device="pdf")
+
+
+
+
+```
+
+
+
+#### Theta power
+
+Mean theta power per animal unnormalised. Error bars=95% CI
+```{r ThetaPlot,  echo=FALSE}
+
+PlotTheta<-ggplot(Summary, 
+               aes(x=Genotype, 
+                   y=MeanTheta)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LTheta, ymax=CI_UTheta, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Theta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotTheta
+
+ggsave("Output/Figures/Theta.pdf", device="pdf")
+
+
+
+
+```
+
+Mean theta power per animal normalised by Broadband1. Error bars=95% CI
+```{r ThetaPlot1,  echo=FALSE}
+
+PlotTheta1<-ggplot(SummaryNorm1, 
+               aes(x=Genotype, 
+                   y=MeanThetaNorm1)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LThetaNorm1, ymax=CI_UThetaNorm1, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Theta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotTheta1
+
+ggsave("Output/Figures/ThetaNorm1.pdf", device="pdf")
+
+
+
+
+```
+
+Mean theta power per animal normalised by Broadband2. Error bars=95% CI
+```{r ThetaPlot2, echo=FALSE}
+
+PlotTheta2<-ggplot(SummaryNorm2, 
+               aes(x=Genotype, 
+                   y=MeanThetaNorm2)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LThetaNorm2, ymax=CI_UThetaNorm2, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Theta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotTheta2
+
+ggsave("Output/Figures/ThetaNorm2.pdf", device="pdf")
+
+
+
+
+```
+
+
+
+#### Gamma power
+Mean gamma1 power per animal unnormalised. Error bars=95% CI
+
+
+```{r Gamma1Plot, echo=FALSE}
+
+PlotGamma1<-ggplot(Summary, 
+               aes(x=Genotype, 
+                   y=MeanGamma1)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LGamma1, ymax=CI_UGamma1, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Gamma power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotGamma1
+
+ggsave("Output/Figures/Gamma1.pdf", device="pdf")
+
+
+
+
+```
+
+
+Mean gamma1 power per animal normalised by Broadband1. Error bars=95% CI
+
+
+```{r GammaPlot1, echo=FALSE}
+
+PlotGamma1Norm1<-ggplot(SummaryNorm1, 
+               aes(x=Genotype, 
+                   y=MeanGamma1Norm1)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LGamma1Norm1, ymax=CI_UGamma1Norm1, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Gamma power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotGamma1Norm1
+
+ggsave("Output/Figures/Gamma1Norm1.pdf", device="pdf")
+
+
+
+
+```
+
+Mean gamma2 power per animal normalised by Broadband1. Error bars=95% CI
+
+
+```{r GammaPlot2, echo=FALSE}
+
+PlotGamma2Norm1<-ggplot(SummaryNorm1, 
+               aes(x=Genotype, 
+                   y=MeanGamma2Norm1)) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LGamma2Norm1, ymax=CI_UGamma2Norm1, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Gamma power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+PlotGamma2Norm1
+
+ggsave("Output/Figures/Gamma1Norm1.pdf", device="pdf")
+
+
+
+
+```
+
+
+
+#### Theta/Delta
+
+High values of theta/delta can indicate REM sleep. We want to look at differences in the distribution of theta/delta. The scripts plot the empirical cumulative distributions of theta/delta. If a recording has movement artifacts, these will skew the ECDF towards low values of theta/delta. So this should be approached with caution.
+
+```{r Create_ThetaOverDeltaBins, echo=FALSE}
+NumBins=floor(max(DataframeAll$ThetaOverDelta, na.rm=TRUE)+1)
+DataframeAll$ThetaOverDeltaBins<-cut(DataframeAll$ThetaOverDelta, NumBins, labels=seq(0, NumBins-1, by=1))
+
+```
+
+```{r Create_ECDFThetaDelta_chunk, echo=FALSE}
+
+
+ECDFAllThetaOverDelta<-data.frame()
+
+for (j in 1:nrow(SummaryDataframe)){
+  ECDFCurrent<-data.frame()
+  #Select animalID for current loop
+    AnimalIDCurrent<-SummaryDataframe$AnimalID[j]
+  #Select genotype for current loop which will be used for ECDF plot
+  GenotypeCurrent<-SummaryDataframe$Genotype[j]
+  #Filter for control conditions for AnimalIDCurrent only 
+  DataframeCurrent<-filter(DataframeAll, AnimalIDVariable==AnimalIDCurrent)
+  
+  #Create ECDF from current Dataframe
+  ECDFCurrent <-CreateECDF(DataframeCurrent, GenotypeCurrent, AnimalIDCurrent, DataframeCurrent$ThetaOverDeltaBins)  #This dataframe has variables CumFreq and MeasureForECDF which are used for plotting
+  #Save to dataframe for all animals to export
+  ECDFAllThetaOverDelta<-rbind(ECDFAllThetaOverDelta, ECDFCurrent)
+}
+
+
+rm(ECDFCurrent, DataframeCurrent)
+```
+
+Plotting the cumulative frequency distributions of intervals with theta/delta in bins of 1 unit separated by genotype. 
+
+```{r ECDFThetaOverDelta_PlotChunk, echo=FALSE} 
+#This is written for 2 genotypes. Additional genotypes should be added by editing line "scale_color_manual()"
+
+FontSize=10
+ECDFAllThetaOverDeltaPlot<-ggplot(ECDFAllThetaOverDelta, aes(x=as.numeric(MeasureForECDF), y=CumFrequency))
+ECDFAllThetaOverDeltaPlot<-ECDFAllThetaOverDeltaPlot +
+  geom_step(aes(group=AnimalIDVariable, color=Genotype)) + 
+  scale_color_manual(breaks=Genotypes[1],Genotypes[2], values=Colors) +
+  xlab("Theta/Delta") + 
+  ylab("Cumulative frequency") + 
+   theme(legend.position = "none", 
+        axis.text.x = element_text(size=FontSize),
+        axis.text.y = element_text(size=FontSize),
+        axis.title.x = element_text(size=FontSize),
+        axis.title.y = element_text(size=FontSize))+
+  scale_x_continuous(breaks=seq(0, 40, 1))+
+  scale_y_continuous(breaks=seq(0, 1, 0.2))
+  
+
+
+#http://blog.amitsharma.in/2015/09/13/cumulative-distribution-plots-for-frequency-Data-in-r/
+
+ECDFAllThetaOverDeltaPlot
+ggsave("Output/Figures/ECDFAllThetaOverDelta.pdf", device="pdf", width=4.5, height = 5, units="cm")
+
+```
+
+
+#### Spike counts
+We look at the distribution of the number of spikes/interval across all intervals in each animal and compare between groups
+
+```{r Create_ECDFSpikes_chunk, echo=FALSE}
+
+ECDFAllSpikes<-data.frame()
+
+for (j in 1:nrow(SummaryDataframe)){
+  ECDFCurrent<-data.frame()
+  #Select animalID for current loop
+    AnimalIDCurrent<-SummaryDataframe$AnimalID[j]
+  #Select genotype for current loop which will be used for ECDF plot
+  GenotypeCurrent<-SummaryDataframe$Genotype[j]
+  #Filter for control conditions for AnimalIDCurrent only 
+  DataframeCurrent<-filter(DataframeAll, AnimalIDVariable==AnimalIDCurrent)
+  
+  #Create ECDF from current Dataframe
+  ECDFCurrent <-CreateECDF(DataframeCurrent, GenotypeCurrent, AnimalIDCurrent, DataframeCurrent$SpikeAndBurstCount) #This dataframe has variables CumFreq and MeasureForECDF which are used for plotting
+  #Save to dataframe for all animals to export
+  ECDFAllSpikes<-rbind(ECDFAllSpikes, ECDFCurrent)
+}
+
+
+rm(ECDFCurrent, DataframeCurrent)
+```
+
+Plotting the cumulative frequency distributions of intervals with theta/delta in bins of 1 unit
+
+```{r ECDFSpikes_PlotChunk, echo=FALSE} 
+
+FontSize=10
+ECDFAllSpikesPlot<-ggplot(ECDFAllSpikes, aes(x=as.numeric(MeasureForECDF), y=CumFrequency))
+ECDFAllSpikesPlot<-ECDFAllSpikesPlot +
+  geom_step(aes(group=AnimalIDVariable, color=Genotype)) + 
+  scale_color_manual(breaks=Genotypes[1], Genotypes[2], values=Colors) +
+  xlab("SpikeAndBurstCount") + 
+  ylab("Cumulative frequency") + 
+   theme(legend.position = "none", 
+        axis.text.x = element_text(size=FontSize),
+        axis.text.y = element_text(size=FontSize),
+        axis.title.x = element_text(size=FontSize),
+        axis.title.y = element_text(size=FontSize))+
+  scale_x_continuous(breaks=seq(0, 40, 1))+
+  scale_y_continuous(breaks=seq(0, 1, 0.2))
+  
+
+
+#http://blog.amitsharma.in/2015/09/13/cumulative-distribution-plots-for-frequency-Data-in-r/
+
+ECDFAllSpikesPlot
+
+ggsave("Output/Figures/ECDFAllSpikesPlot.pdf", device="pdf", width=4.5, height = 5, units="cm")
+
+
+```
+
+
+
+To compare between genotypes, for each animal, we extract the proportion of intervals with more than 0 spikes and write it to SummaryDataframe as a new variable Grtr0Spikes. This can be used for plotting and statisitcs
+
+``` {r ECDFSpikes_stats_chunk, ECHO=TRUE, include=TRUE}
+#For each animal, evaluate the percentile of intervals with one or more spikes and write to the Summary dataframe
+
+#1-ECDFCurrent$CumFrequency[1] is the number of intervals with 1 or more spikes
+Grtr0Spikes<-vector()
+for(i in 1:nrow(SummaryDataframe)){
+  AnimalIDCurrent<-Summary$AnimalIDVariable[i]
+  ECDFCurrent<-filter(ECDFAllSpikes, AnimalIDVariable==AnimalIDCurrent)
+  Grtr0Spikes[i]<-1-(ECDFCurrent$CumFrequency[1]) 
+}
+Summary$Grtr0Spikes <- Grtr0Spikes
+
+
+
+
+```
+
+
+
+##### Plotting % intervals > 0 spikes
+```{r ScatterPlotChunk, echo=FALSE}
+
+
+FontSize<-10
+
+Grtr0SpikePlot<- ggplot(Summary, aes(x=Genotype, y=Grtr0Spikes))
+
+Grtr0SpikePlot <- Grtr0SpikePlot+
+  geom_boxplot()+
+  xlab("Genotype")+
+  ylim(0, 0.5)+
+  ylab("Prop intervals > 0 spikes")+
+  theme(axis.text.x = element_text(size=FontSize),
+        axis.text.y = element_text(size=FontSize),
+        axis.title.x = element_text(size=FontSize),
+        axis.title.y = element_text(size=FontSize))
+ 
+
+ 
+Grtr0SpikePlot 
+
+ggsave("Output/Figures/Grtr0SpikesPlot.pdf", device="pdf", width=4.5, height = 5, units="cm")
+
+```
+
+
+## Analysis of spectral features and spikes separated by behavioural state{.tabset}
+
+
+If IncludeVideoScored=TRUE, we import VideoScoring data and create a dataframe of the subset of the data that has been videoscored with the behavioural state in each interval. 
+```{r}
+IncludeVideoScored=TRUE
+```
+
+
+```{r MakeVideoScoringDataframe, echo=FALSE, eval=IncludeVideoScored}
+
+FileList<-c("./Data/VideoScoring/CDKL5_345_190817_1.csv",
+            "./Data/VideoScoring/CDKL5_346_190817_1.csv",   
+            "./Data/VideoScoring/CDKL5_353_190817_1.csv",  
+            "./Data/VideoScoring/CDKL5_357_190817_1.csv",
+            "./Data/VideoScoring/CDKL5_358_190817_1.csv" 
+        )  #FileList lists all .csv files with videoscoring. Files contain variables "Date", "Time", "S_W", e.g. 19/08/2017,12:15:31,S. Each row specifies a behavioural state and needs only to include the transition to the next behavioural state. The last entry must be the behavioural state at the end of the observation period.
+
+
+AnimalIDList<-c("CDKL5_345",
+                "CDKL5_346",
+                "CDKL5_353", 
+                "CDKL5_357", 
+                "CDKL5_358"
+            )  #AnimalIDList specifies AnimalID for each file in FileList
+
+DataframeVideoTimesAll<-data.frame()
+
+AnimalIDVideoStartEnd<-list() #A list to store Start and End times for video data. The list index is AnimalID_FileIndex eg. JF220_1
+
+for(FileIndex in 1:length(FileList)){
+   VideoScoringFilename<-FileList[[FileIndex]] 
+   AnimalIDCurrent<-AnimalIDList[[FileIndex]]
+   
+    #Import
+    VideoScoring<- read.csv(VideoScoringFilename)
+    VideoScoring<-dplyr::select(VideoScoring, Date, Time,  S_W)
+    
+    VideoScoring$S_W<-as.character(VideoScoring$S_W) #needs to be character. "as.factor" converts to numeric factors
+    
+    #Add date to Time to make TimeString
+    VideoScoring$DateTime<-paste(VideoScoring$Date, VideoScoring$Time)
+    VideoScoring$DateTime<-strptime(as.character(VideoScoring$DateTime), "%d/%m/%Y %H:%M:%S")
+    #Convert to UnixTime
+    VideoScoring$UnixTime<-(as.numeric(as.POSIXct(VideoScoring$DateTime)))
+    #Determine Start and End time of video file for particular day
+    VideoStartTime<-VideoScoring$UnixTime[1]
+    VideoEndTime<-VideoScoring$UnixTime[nrow(VideoScoring)]
+    #Create vector with videostart and videoend variables for this FileIndex iteration to be stored in AnimalIDVideoStartEnd
+    AnimalIDVideoStartEndVectorCurrent<-c(as.numeric(VideoStartTime), as.numeric(VideoEndTime))
+    ListIndex<-paste(AnimalIDCurrent, as.character(FileIndex), sep="_")
+    AnimalIDVideoStartEnd[[ListIndex]]<-AnimalIDVideoStartEndVectorCurrent
+    
+    #Filter DataframeAll between start and endtime of video for particular animals. Note that interval time stamps do not equal
+
+    DataframeVideoTimes<-filter(DataframeAll,
+                                  AnimalIDVariable==AnimalIDCurrent)
+    DataframeVideoTimes<-filter(DataframeVideoTimes,
+                                  InitialisedTime>=VideoStartTime)
+    DataframeVideoTimes<-filter(DataframeVideoTimes, InitialisedTime<=VideoEndTime)
+    
+    
+    #Add video score to dataframe for which video is available
+    
+    DataframeVideoTimes$SleepWake<-AddVideoScoreToSCPPData(DataframeVideoTimes$InitialisedTime, VideoScoring$UnixTime, VideoScoring$S_W)
+    DataframeVideoTimesAll<-rbind(DataframeVideoTimesAll, DataframeVideoTimes)
+  
+    DataframeVideoTimesAll$SleepWake<-as.factor(DataframeVideoTimesAll$SleepWake)
+}
+
+rm(DataframeVideoTimes, VideoScoring)
+
+write.csv(DataframeVideoTimesAll, "./Output/DataframeVideoTimesAll.csv")
+```
+
+
+Create time series plots of variables showing sleep-wake by colour. The chunk iterates through all animals and saves output plots into folder ./Output/BehavioralState
+
+```{r, PlotThetaDeltaSW_all, echo=FALSE, eval=IncludeVideoScored}
+
+      for(FileIndex in 1:length(AnimalIDVideoStartEnd)){ #Loop through all video files from video start to end and plot
+        AnimalIDCurrent<-AnimalIDList[[FileIndex]]
+        ListID<-paste(AnimalIDCurrent, as.character(FileIndex), sep="_")
+      
+      ThetaPlot<-ggplot(filter(DataframeVideoTimesAll, AnimalIDVariable==AnimalIDCurrent), aes(x=InitialisedTime, y=Theta, color=SleepWake))+geom_point()+xlim(AnimalIDVideoStartEnd[[ListID]])+ylim(0,80)+ggtitle(ListID)
+      
+      DeltaPlot<-ggplot(filter(DataframeVideoTimesAll, AnimalIDVariable==AnimalIDCurrent), aes(x=InitialisedTime, y=Delta, color=SleepWake))+geom_point()+xlim(AnimalIDVideoStartEnd[[ListID]])+ylim(0,200)
+      
+      ThetaOverDeltaPlot<-ggplot(filter(DataframeVideoTimesAll, AnimalIDVariable==AnimalIDCurrent), aes(x=InitialisedTime, y=ThetaOverDelta, color=SleepWake))+geom_point()+xlim(AnimalIDVideoStartEnd[[ListID]])+ylim(0, 30)
+      
+      Gamma1Plot<-ggplot(filter(DataframeVideoTimesAll, AnimalIDVariable==AnimalIDCurrent), aes(x=InitialisedTime, y=Gamma1, color=SleepWake))+geom_point()+xlim(AnimalIDVideoStartEnd[[ListID]])+ylim(0, 10)
+      
+      SpikeAndBurstPlot<-ggplot(filter(DataframeVideoTimesAll, AnimalIDVariable==AnimalIDCurrent), aes(x=InitialisedTime, y=SpikeAndBurstCount, color=SleepWake))+geom_point()+xlim(AnimalIDVideoStartEnd[[ListID]])
+      
+        
+      
+      FileName<-paste("./Output/Figures/BehaviouralState/", "BehaviouralState",ListID,".pdf", sep="")
+
+    PlotGridSave<-plot_grid(ThetaPlot, DeltaPlot, ThetaOverDeltaPlot, Gamma1Plot, SpikeAndBurstPlot, align = "v", nrow = 5)
+  
+ if(dir.exists("./Output/Figures/BehaviouralState")==FALSE) {
+   dir.create("./Output/Figures/BehaviouralState")
+ }
+  pdf(file=FileName)
+  print(PlotGridSave)
+  dev.off()
+      
+}
+
+```
+### Summary data
+Summarise each variable by sleep and wake, for individual animals separated by genotype
+```{r, SWGrouping,  echo=FALSE, eval=IncludeVideoScored}
+#if("plyr" %in% (.packages())){
+ # detach("package:plyr", unload=TRUE)
+#}
+#Group by AnimalID and SleepWake
+SW_grouped<-dplyr::group_by(DataframeVideoTimesAll, AnimalIDVariable, SleepWake, Genotype)
+#Compute the mean spike rate for each animal in each behavioural state                     
+SummarySW<-dplyr::summarise(SW_grouped,
+                            num=n(),
+                     MeanTheta=mean(Theta),
+                     SEMTheta=sd(Theta)/sqrt(n()),
+                     CI_LTheta=CI(Theta)[1],
+                     CI_UTheta=CI(Theta)[3], 
+                     MeanDelta=mean(Delta),
+                     SEMDelta=sd(Delta)/sqrt(n()),
+                     CI_LDelta=CI(Delta)[1],
+                     CI_UDelta=CI(Delta)[3], 
+                     MeanGamma=mean(Gamma1),
+                     SEMGamma=sd(Gamma1)/sqrt(n()),
+                     CI_LGamma=CI(Gamma1)[1],
+                     CI_UGamma=CI(Gamma1)[3], 
+                     MeanThetaOverDelta=mean(ThetaOverDelta),
+                     SEMThetaOverDelta=sd(ThetaOverDelta)/sqrt(n()),
+                     CI_LThetaOverDelta=CI(ThetaOverDelta)[1],
+                     CI_UThetaOverDelta=CI(ThetaOverDelta)[3],
+                     RangeThetaOverDeltaL=range(ThetaOverDelta)[1],
+                     RangeThetaOverDeltaU=range(ThetaOverDelta)[2],
+                     SleepWakeFull=if(SleepWake=="S") "Sleep" else "Wake",
+                     MeanSpikeAndBurst=mean(SpikeAndBurstCount),
+                     SEMSpikeAndBurst=sd(SpikeAndBurstCount)/sqrt(n()), 
+                     CI_LSpikeAndBurst=CI(SpikeAndBurstCount)[1], 
+                     CI_USpikeAndBurst=CI(SpikeAndBurstCount)[3])
+
+SummarySW
+
+
+
+```
+
+### Plots{.tabset}
+
+####Delta
+```{r, SWDeltaPlot, echo=FALSE, eval=IncludeVideoScored}
+
+SWPlotDelta<-ggplot(SummarySW, 
+               aes(x=Genotype, 
+                   y=MeanDelta)) +
+              facet_grid(.~SleepWakeFull) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LDelta, ymax=CI_UDelta, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Delta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))
+
+
+SWPlotDelta
+
+ggsave("Output/Figures/SWDelta.pdf", device="pdf")
+
+
+```
+
+#### Theta
+```{r, SWThetaPlot, echo=FALSE, eval=IncludeVideoScored}
+SWPlotTheta<-ggplot(SummarySW, 
+               aes(x=Genotype, 
+                   y=MeanTheta)) +
+              facet_grid(.~SleepWakeFull) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LTheta, ymax=CI_UTheta, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Theta power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))
+
+SWPlotTheta
+
+ggsave("Output/Figures/SWTheta.pdf", device="pdf")
+
+```
+
+#### Gamma
+```{r, SWGammaPlot, echo=FALSE, eval=IncludeVideoScored}
+SWPlotGamma<-ggplot(SummarySW, 
+               aes(x=Genotype, 
+                   y=MeanGamma)) +
+              facet_grid(.~SleepWakeFull) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LGamma, ymax=CI_UGamma, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Gamma power (au)") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))
+
+
+SWPlotGamma
+
+ggsave("Output/Figures/SWGamma.pdf", device="pdf")
+
+```
+
+#### ThetaOverDelta
+```{r, SWThetaOverDeltaPlot, echo=FALSE, eval=IncludeVideoScored}
+SWPlotThetaOverDelta<-ggplot(SummarySW, 
+               aes(x=Genotype, 
+                   y=MeanThetaOverDelta)) +
+              facet_grid(.~SleepWakeFull) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  geom_errorbar(aes(ymin=CI_LThetaOverDelta, ymax=CI_UThetaOverDelta, width=0.4, color=Genotype))+
+  scale_color_manual(values=Colors)+
+  ylab("Theta/Delta") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))
+
+
+SWPlotThetaOverDelta
+
+ggsave("Output/Figures/SWThetaOverDelta.pdf", device="pdf")
+
+```
+
+#### ThetaOverDelta Upper bound
+
+```{r, SWThetaOverDeltaUpperPlot, echo=FALSE, eval=IncludeVideoScored}
+SWPlotThetaOverDeltaU<-ggplot(SummarySW, 
+               aes(x=Genotype, 
+                   y=RangeThetaOverDeltaU)) +
+              facet_grid(.~SleepWakeFull) +
+  geom_point(aes(group=AnimalIDVariable, color=Genotype, size=2)) +
+  scale_color_manual(values=Colors)+
+  ylab("Upper bound of theta/delta") +
+  xlab("Genotype") +
+  theme(legend.position = "none") +
+  theme(axis.text.x = element_text(angle=60, hjust=1))#+
+  #scale_color_brewer(palette = "Set1")
+
+
+SWPlotThetaOverDeltaU
+
+ggsave("Output/Figures/SWThetaOverDeltaU.pdf", device="pdf")
+```
+
+## Save Data
+Write data to files
+```{r, WriteSummaries}
+write.csv(Summary, "./Output/Summary.csv")
+write.csv(SummaryNorm1, "./Output/SpectralPowerSummaryBroadband1.csv")
+write.csv(SummaryNorm2, "./Output/SpectralPowerSummaryBroadband2.csv")
+write.csv(ECDFAllThetaOverDelta, "./Output/ECDFAllThetaOverDelta.csv")
+write.csv(ECDFAllSpikes, "./Output/ECDFAllSpikes.csv")
+if(IncludeVideoScored==TRUE){
+  write.csv(SummarySW, "./Output/SummarySW.csv")
+}
+
+
+
+```
+
