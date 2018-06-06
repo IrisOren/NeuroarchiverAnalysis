@@ -38,6 +38,8 @@ The following csv files are saved and can be used for futher stats
 
 Plots are saved to Outputs/Figures
 
+The analysis is written for 2 genotypes. Certain elements may need to be edited for more than 2 genotypes (not tested)
+
 ##Housekeeping
 
 First, load packages and source files
@@ -78,6 +80,38 @@ Specify files and folders to be used
 NDFDataParentFolder<-"C:/Users/ioren/Dropbox/Analysis/Neuroarchiver/CDKL5/CDKL5_SCPP4V2"  #SPECIFY THE PARENT DIRECTORY OF THE SCPP4V2 PROCESSOR OUTPUT FILES
 RecordingInfoFile<-"./Data/RecordingInfo.csv"
 OutputFolder<-"./Output"  #Folder where analysis outputs are saved
+#Example traces; Comment out if IncludeExampleTraces=FALSE
+ExampleTrace1_1<-"./Data/M1503139415/CDKL5_345_Wake_Tmin2136.txt" #Transmitter27
+ExampleTrace1_2<-"./Data/M1503139415/CDKL5_345_SWS_Tmin1936.txt" #Transmitter27
+ExampleTrace1_3<-"./Data/M1503139415/CDKL5_345_REM_Tmin2200.txt" #Transmitter27
+ExampleTrace2_1<-"./Data/M1503139415/CDKL5_357_Wake_Tmin2320.txt" #Transmitter27
+ExampleTrace2_2<-"./Data/M1503139415/CDKL5_357_SWS_Tmin2664.txt" #Transmitter27
+ExampleTrace2_3<-"./Data/M1503139415/CDKL5_357_REM_Tmin2960.txt" #Transmitter27
+
+#Example spectra; Comment out if IncludeExamplePSD=FALSE
+ExamplePSD1_1<-"./Data/PSD/M1470125501_Tmin3472_Spec.txt"
+ExamplePSD1_2<-"./Data/PSD/M1470132701_Tmin312_Spec.txt"
+ExamplePSD1_3<-"./Data/PSD/M1470132701_Tmin1280_Spec.txt" 
+ExamplePSD2_1<-"./Data/PSD/M1470125501_Tmin3472_Spec.txt" 
+ExamplePSD2_2<-"./Data/PSD/M1470132701_Tmin312_Spec.txt"
+ExamplePSD2_3<-"./Data/PSD/M1470132701_Tmin1280_Spec.txt" 
+
+#If IncludeVideoScored=FALSE, Comment out VideoScoreFileList and VideoScoreAnimalIDList
+VideoScoreFileList<-c("./Data/VideoScoring/CDKL5_345_190817_1.csv",
+            "./Data/VideoScoring/CDKL5_346_190817_1.csv",   
+            "./Data/VideoScoring/CDKL5_353_190817_1.csv",  
+            "./Data/VideoScoring/CDKL5_357_190817_1.csv",
+            "./Data/VideoScoring/CDKL5_358_190817_1.csv" 
+        )  #VideoScoreFileList lists all .csv files with videoscoring. Files contain variables "Date", "Time", "S_W", e.g. 19/08/2017,12:15:31,S. Each row specifies a behavioural state and needs only to include the transition to the next behavioural state. The last entry must be the behavioural state at the end of the observation period.
+
+
+VideoScoreAnimalIDList<-c("CDKL5_345",
+                "CDKL5_346",
+                "CDKL5_353", 
+                "CDKL5_357", 
+                "CDKL5_358"
+            )  #VideoScoreAnimalIDList specifies AnimalID for each file in VideoScoreFileList
+
 ```
 
 Set thresholds and variables
@@ -86,9 +120,17 @@ FalsePositiveCutOff=0.1  #Threshold for excluding animal based on high false pos
 LossIntervalPercentageThreshold<-5 #Limit for percent of intervals lost to include animal in analysis in %
 LossThreshold<-20  #Threshold for packet loss within an interval for exclusion
 DeltaThreshold<-1000  #Threshold for delta power within an interval for exclusion. Units: Counts
-
 LightsOn<-7
 LightsOff<-19
+
+#Set logical variables for chunks to include
+EvalNormaliseByBroadband<-TRUE
+EvalSpikes<-TRUE
+IncludeExampleTraces<-TRUE
+IncludeExamplePSD<-TRUE
+IncludeVideoScored<-TRUE
+
+
 
 ```
 
@@ -98,7 +140,7 @@ detach("package:dplyr", character.only = TRUE)
 library("dplyr", character.only = TRUE)
 SummaryDataframe<-read.csv(RecordingInfoFile, na = "empty")
 SummaryDataframe$AnimalID<-as.character(SummaryDataframe$AnimalID)
-#SummaryDataframe<-filter(SummaryDataframe, FalsePositive<FalsePositiveCutOff)
+SummaryDataframe<-filter(SummaryDataframe, FalsePositive<FalsePositiveCutOff)
 ```
 
 The dataset used in analysis is from the following animals
@@ -176,7 +218,7 @@ if(RemoveOption==1){
 
 Normalise by broadband power.. We use two normalisations. Median of Broadband1=5-160Hz, Broadband2=0.1-160Hz.Broadband1 normalisation will avoid contamination arising from artifacts
 
-```{r NormaliseByBroadband, echo=FALSE, include=TRUE}
+```{r NormaliseByBroadband, echo=FALSE, eval=EvalNormaliseByBroadband}
 #Get median of broadband1 and broadband2 power per animal
 DataframeAll$MedianBroadbandPower1<-ave(DataframeAll$Broadband1, DataframeAll$AnimalIDVariable, FUN=function(x) median(x, na.rm=TRUE))
 
@@ -210,25 +252,23 @@ Genotypes
 ## Example traces {.tabset}
 We can plot example traces which have been exported using the neuroarchiver Export.tcl. The following chunks plot traces which have been manually identified as sleep and wake. If included, change the value of "include =FALSE" to "TRUE", and specify the filenames to be used.   The chunks below are for 2 genotypes. Can be copied to add more genotypes.
 
-```{r}
-IncludeExampleTraces=TRUE
-```
+
 ### `r Genotypes[1]`
 
-```{r, eval=IncludeExampleTraces, echo=FALSE}
-Filename1<-"./Data/M1503139415/CDKL5_345_Wake_Tmin2136.txt" #Transmitter27
+```{r ExampleTraces1Chunk, eval=IncludeExampleTraces, echo=FALSE}
 
-Trace1<-read.csv(Filename1, header = FALSE)
+
+Trace1<-read.csv(ExampleTrace1_1, header = FALSE)
 Trace1<-Trace1*400*10^(-6)  #Data scaling for A3028B transmitter
 
-Filename2<-"./Data/M1503139415/CDKL5_345_SWS_Tmin1936.txt" #Transmitter27
 
-Trace2<-read.csv(Filename2, header = FALSE)
+
+Trace2<-read.csv(ExampleTrace1_2, header = FALSE)
 Trace2<-Trace2*400*10^(-6)
 
-Filename3<-"./Data/M1503139415/CDKL5_345_REM_Tmin2200.txt" #Transmitter27
 
-Trace3<-read.csv(Filename3, header = FALSE)
+
+Trace3<-read.csv(ExampleTrace1_3, header = FALSE)
 Trace3<-Trace3*400*10^(-6)
 
 Traces<-data.frame(c(Trace1, Trace2, Trace3))
@@ -260,34 +300,84 @@ Plot<-ggplot(data = Traces.melted, aes(x = Time, y = value))+
          panel.border = element_blank())
 Plot
 
-ggsave("Output/Figures/CDKL5_345_tracesWT.pdf",width=12,height=10, units="cm", device="pdf")
+ggsave("Output/Figures/ExampleTraces1.pdf",width=12,height=10, units="cm", device="pdf")
 ```
 
 
+```{r ExamplesSpectra1Chunk, eval=IncludeExamplePSD, echo=FALSE}
+Height=4
+Width=7
+FontSize=10
+
+Spec1<-read.table(ExamplePSD1_1, header = FALSE, check.names = FALSE, sep=" ")
+Freq<-as.vector(Spec1[1])
+names(Freq)<-"Freq"
+Spec1<-Spec1[2]
+Spec1<-Spec1*((400*10^(-6))^2/10^(-6)) # Convert to V^2* 10e-6/Hz
+
+Spec2<-read.table(ExamplePSD1_2, header = FALSE, check.names = FALSE, sep=" ")
+Spec2<-Spec2[2]
+Spec2<-Spec2*((400*10^(-6))^2/10^(-6))
+
+Spec3<-read.table(ExamplePSD1_3, header = FALSE, check.names = FALSE, sep=" ")
+Spec3<-Spec3[2]
+Spec3<-Spec3*((400*10^(-6))^2/10^(-6))
+
+Spec<-data.frame(c(Spec1, Spec2, Spec3))
+names(Spec)<-c("PSD1", "PSD2", "PSD3")
+
+Spec$Freq<-Freq$Freq
+
+Spec.melted<-melt(Spec, id="Freq") # Arrange dataframe by frequency and add variable to identify state 1/2/3 for facet plot
+
+
+Plot<-ggplot(data = Spec.melted, aes(x = Freq, y = value))+
+    geom_line()+
+    facet_grid(variable~.)+
+    scale_y_continuous(limits=c(0, 30))+
+    scale_x_continuous(limits=c(0.1, 256), breaks=c(2, 20, 200))+
+    coord_trans(x="log10")+
+    theme_bw()+
+    theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.x=element_text(size=FontSize), 
+        axis.text.x=element_text(size=FontSize), 
+        legend.position = "none", 
+        axis.text.y = element_text(size=FontSize),
+        axis.title.y = element_text(size=FontSize))+
+    labs(x="Frequency (Hz)", 
+        y=expression(paste("Power (","10"^{-6},"V"^2, "/Hz)")))
+
+Plot
+
+ggsave("Output/Figures/PSD1.pdf", device="pdf", height=Height, width=Width, units="cm")
+
+```
+
 ### `r Genotypes[2]`
 
-```{r, eval=IncludeExampleTraces, echo=FALSE}
-Filename1<-"./Data/M1503139415/CDKL5_357_Wake_Tmin2320.txt" #Transmitter27
+```{r ExampleTraces2Chunk, eval=IncludeExampleTraces, echo=FALSE}
 
-Trace1<-read.csv(Filename1, header = FALSE)
+
+Trace1<-read.csv(ExampleTrace2_1, header = FALSE)
 Trace1<-Trace1*400*10^(-6)
 
-Filename2<-"./Data/M1503139415/CDKL5_357_SWS_Tmin2664.txt" #Transmitter27
 
-Trace2<-read.csv(Filename2, header = FALSE)
+
+Trace2<-read.csv(ExampleTrace2_2, header = FALSE)
 Trace2<-Trace2*400*10^(-6)
 
-Filename3<-"./Data/M1503139415/CDKL5_357_REM_Tmin2960.txt" #Transmitter27
 
-Trace3<-read.csv(Filename3, header = FALSE)
+
+Trace3<-read.csv(ExampleTrace2_3, header = FALSE)
 Trace3<-Trace3*400*10^(-6)
 
 Traces<-data.frame(c(Trace1, Trace2, Trace3))
 names(Traces)<-c("i. Wake", "ii.Sleep", "iii.Sleep")
 
 Traces$Time<-seq(from=0,to=((nrow(Traces)-1)/512), by=1/512)
-
-#MaxSpan<-max(c((max1-min1), (max2-min2), (max3-min3)))
 
 Traces.melted<-melt(Traces, id="Time")
 
@@ -311,10 +401,60 @@ Plot<-ggplot(data = Traces.melted, aes(x = Time, y = value))+
          panel.border = element_blank())
 Plot
 
-ggsave("Output/Figures/CDKL5_357_tracesCDKL5.pdf",width=12,height=10, units="cm", device="pdf")
+ggsave("Output/Figures/ExampleTraces2.pdf",width=12,height=10, units="cm", device="pdf")
 ```
 
+```{r ExamplesSpectra2Chunk, eval=IncludeExamplePSD, echo=FALSE}
+Height=4
+Width=7
+FontSize=10
 
+Spec1<-read.table(ExamplePSD2_1, header = FALSE, check.names = FALSE, sep=" ")
+Freq<-as.vector(Spec1[1])
+names(Freq)<-"Freq"
+Spec1<-Spec1[2]
+Spec1<-Spec1*((400*10^(-6))^2/10^(-6)) # Convert to V^2* 10e-6/Hz
+
+Spec2<-read.table(ExamplePSD2_2, header = FALSE, check.names = FALSE, sep=" ")
+Spec2<-Spec2[2]
+Spec2<-Spec2*((400*10^(-6))^2/10^(-6))
+
+Spec3<-read.table(ExamplePSD2_3, header = FALSE, check.names = FALSE, sep=" ")
+Spec3<-Spec3[2]
+Spec3<-Spec3*((400*10^(-6))^2/10^(-6))
+
+Spec<-data.frame(c(Spec1, Spec2, Spec3))
+names(Spec)<-c("PSD1", "PSD2", "PSD3")
+
+Spec$Freq<-Freq$Freq
+
+Spec.melted<-melt(Spec, id="Freq") # Arrange dataframe by frequency and add variable to identify state 1/2/3 for facet plot
+
+
+Plot<-ggplot(data = Spec.melted, aes(x = Freq, y = value))+
+    geom_line()+
+    facet_grid(variable~.)+
+    scale_y_continuous(limits=c(0, 30))+
+    scale_x_continuous(limits=c(0.1, 256), breaks=c(2, 20, 200))+
+    coord_trans(x="log10")+
+    theme_bw()+
+    theme(panel.border = element_blank(), 
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(), 
+        axis.line = element_line(colour = "black"),
+        axis.title.x=element_text(size=FontSize), 
+        axis.text.x=element_text(size=FontSize), 
+        legend.position = "none", 
+        axis.text.y = element_text(size=FontSize),
+        axis.title.y = element_text(size=FontSize))+
+    labs(x="Frequency (Hz)", 
+        y=expression(paste("Power (","10"^{-6},"V"^2, "/Hz)")))
+
+Plot
+
+ggsave("Output/Figures/PSD2.pdf", device="pdf", height=Height, width=Width, units="cm")
+
+```
 ## Analysis of spectral features and spikes across recording
 
 ### Summary data {.tabset}
@@ -359,7 +499,7 @@ Summary
 
 #### Normalised by broadband 1
 
-```{r, Grouped_Broadband1, include=TRUE, echo=FALSE}
+```{r, Grouped_Broadband1, eval=EvalNormaliseByBroadband, echo=FALSE}
 
 Grouped<-dplyr::group_by(DataframeAll, AnimalIDVariable, Genotype)
 #Compute the summary statistics for spectral power for each animal for normalisation by Broadband1 and Broadband2           
@@ -391,7 +531,7 @@ SummaryNorm1
 
 #### Normalised by broadband 2
 
-```{r, Grouped_Broadband2, include=TRUE, echo=FALSE}
+```{r, Grouped_Broadband2, eval=EvalNormaliseByBroadband, echo=FALSE}
 SummaryNorm2<-dplyr::summarise(Grouped,
                             num=n(),
                      MeanThetaNorm2=mean(ThetaNorm2),
@@ -444,7 +584,7 @@ ggsave("Output/Figures/Delta.pdf", device="pdf")  #Save plot to Output/Figures f
 
 
 Mean delta power per animal normalised by Broadband1. Error bars=95% CI
-```{r DeltaPlot1, echo=FALSE}
+```{r DeltaPlot1, eval=EvalNormaliseByBroadband, echo=FALSE}
 
 PlotDelta1<-ggplot(SummaryNorm1, 
                aes(x=Genotype, 
@@ -469,7 +609,7 @@ ggsave("Output/Figures/DeltaNorm1.pdf", device="pdf")
 ```
 
 Mean delta power per animal normalised by Broadband2. Error bars=95% CI
-```{r DeltaPlot2,  echo=FALSE}
+```{r DeltaPlot2, eval=EvalNormaliseByBroadband,  echo=FALSE}
 
 PlotDelta2<-ggplot(SummaryNorm2, 
                aes(x=Genotype, 
@@ -523,7 +663,7 @@ ggsave("Output/Figures/Theta.pdf", device="pdf")
 ```
 
 Mean theta power per animal normalised by Broadband1. Error bars=95% CI
-```{r ThetaPlot1,  echo=FALSE}
+```{r ThetaPlot1, eval=EvalNormaliseByBroadband,  echo=FALSE}
 
 PlotTheta1<-ggplot(SummaryNorm1, 
                aes(x=Genotype, 
@@ -548,7 +688,7 @@ ggsave("Output/Figures/ThetaNorm1.pdf", device="pdf")
 ```
 
 Mean theta power per animal normalised by Broadband2. Error bars=95% CI
-```{r ThetaPlot2, echo=FALSE}
+```{r ThetaPlot2, eval=EvalNormaliseByBroadband, echo=FALSE}
 
 PlotTheta2<-ggplot(SummaryNorm2, 
                aes(x=Genotype, 
@@ -606,7 +746,7 @@ ggsave("Output/Figures/Gamma1.pdf", device="pdf")
 Mean gamma1 power per animal normalised by Broadband1. Error bars=95% CI
 
 
-```{r GammaPlot1, echo=FALSE}
+```{r Gamma1Plot1, eval=EvalNormaliseByBroadband, echo=FALSE}
 
 PlotGamma1Norm1<-ggplot(SummaryNorm1, 
                aes(x=Genotype, 
@@ -633,7 +773,7 @@ ggsave("Output/Figures/Gamma1Norm1.pdf", device="pdf")
 Mean gamma2 power per animal normalised by Broadband1. Error bars=95% CI
 
 
-```{r GammaPlot2, echo=FALSE}
+```{r Gamma2Plot2,eval=EvalNormaliseByBroadband,  echo=FALSE}
 
 PlotGamma2Norm1<-ggplot(SummaryNorm1, 
                aes(x=Genotype, 
@@ -726,7 +866,7 @@ ggsave("Output/Figures/ECDFAllThetaOverDelta.pdf", device="pdf", width=4.5, heig
 #### Spike counts
 We look at the distribution of the number of spikes/interval across all intervals in each animal and compare between groups
 
-```{r Create_ECDFSpikes_chunk, echo=FALSE}
+```{r Create_ECDFSpikes_chunk, eval=EvalSpikes,  echo=FALSE}
 
 ECDFAllSpikes<-data.frame()
 
@@ -749,9 +889,9 @@ for (j in 1:nrow(SummaryDataframe)){
 rm(ECDFCurrent, DataframeCurrent)
 ```
 
-Plotting the cumulative frequency distributions of intervals with theta/delta in bins of 1 unit
+Plotting the cumulative frequency distributions of intervals with spikes in bins of 1 unit
 
-```{r ECDFSpikes_PlotChunk, echo=FALSE} 
+```{r ECDFSpikes_PlotChunk, eval=EvalSpikes, echo=FALSE} 
 
 FontSize=10
 ECDFAllSpikesPlot<-ggplot(ECDFAllSpikes, aes(x=as.numeric(MeasureForECDF), y=CumFrequency))
@@ -764,10 +904,7 @@ ECDFAllSpikesPlot<-ECDFAllSpikesPlot +
         axis.text.x = element_text(size=FontSize),
         axis.text.y = element_text(size=FontSize),
         axis.title.x = element_text(size=FontSize),
-        axis.title.y = element_text(size=FontSize))+
-  scale_x_continuous(breaks=seq(0, 40, 1))+
-  scale_y_continuous(breaks=seq(0, 1, 0.2))
-  
+        axis.title.y = element_text(size=FontSize))
 
 
 #http://blog.amitsharma.in/2015/09/13/cumulative-distribution-plots-for-frequency-Data-in-r/
@@ -783,7 +920,7 @@ ggsave("Output/Figures/ECDFAllSpikesPlot.pdf", device="pdf", width=4.5, height =
 
 To compare between genotypes, for each animal, we extract the proportion of intervals with more than 0 spikes and write it to SummaryDataframe as a new variable Grtr0Spikes. This can be used for plotting and statisitcs
 
-``` {r ECDFSpikes_stats_chunk, ECHO=TRUE, include=TRUE}
+``` {r ECDFSpikes_stats_chunk, echo=FALSE, eval=EvalSpikes}
 #For each animal, evaluate the percentile of intervals with one or more spikes and write to the Summary dataframe
 
 #1-ECDFCurrent$CumFrequency[1] is the number of intervals with 1 or more spikes
@@ -803,7 +940,7 @@ Summary$Grtr0Spikes <- Grtr0Spikes
 
 
 ##### Plotting % intervals > 0 spikes
-```{r ScatterPlotChunk, echo=FALSE}
+```{r ScatterPlotChunk, eval=EvalSpikes,echo=FALSE}
 
 
 FontSize<-10
@@ -833,35 +970,20 @@ ggsave("Output/Figures/Grtr0SpikesPlot.pdf", device="pdf", width=4.5, height = 5
 
 
 If IncludeVideoScored=TRUE, we import VideoScoring data and create a dataframe of the subset of the data that has been videoscored with the behavioural state in each interval. 
-```{r}
-IncludeVideoScored=TRUE
-```
+
 
 
 ```{r MakeVideoScoringDataframe, echo=FALSE, eval=IncludeVideoScored}
 
-FileList<-c("./Data/VideoScoring/CDKL5_345_190817_1.csv",
-            "./Data/VideoScoring/CDKL5_346_190817_1.csv",   
-            "./Data/VideoScoring/CDKL5_353_190817_1.csv",  
-            "./Data/VideoScoring/CDKL5_357_190817_1.csv",
-            "./Data/VideoScoring/CDKL5_358_190817_1.csv" 
-        )  #FileList lists all .csv files with videoscoring. Files contain variables "Date", "Time", "S_W", e.g. 19/08/2017,12:15:31,S. Each row specifies a behavioural state and needs only to include the transition to the next behavioural state. The last entry must be the behavioural state at the end of the observation period.
 
-
-AnimalIDList<-c("CDKL5_345",
-                "CDKL5_346",
-                "CDKL5_353", 
-                "CDKL5_357", 
-                "CDKL5_358"
-            )  #AnimalIDList specifies AnimalID for each file in FileList
 
 DataframeVideoTimesAll<-data.frame()
 
 AnimalIDVideoStartEnd<-list() #A list to store Start and End times for video data. The list index is AnimalID_FileIndex eg. JF220_1
 
-for(FileIndex in 1:length(FileList)){
-   VideoScoringFilename<-FileList[[FileIndex]] 
-   AnimalIDCurrent<-AnimalIDList[[FileIndex]]
+for(FileIndex in 1:length(VideoScoreFileList)){
+   VideoScoringFilename<-VideoScoreFileList[[FileIndex]] 
+   AnimalIDCurrent<-VideoScoreAnimalIDList[[FileIndex]]
    
     #Import
     VideoScoring<- read.csv(VideoScoringFilename)
@@ -910,7 +1032,7 @@ Create time series plots of variables showing sleep-wake by colour. The chunk it
 ```{r, PlotThetaDeltaSW_all, echo=FALSE, eval=IncludeVideoScored}
 
       for(FileIndex in 1:length(AnimalIDVideoStartEnd)){ #Loop through all video files from video start to end and plot
-        AnimalIDCurrent<-AnimalIDList[[FileIndex]]
+        AnimalIDCurrent<-VideoScoreAnimalIDList[[FileIndex]]
         ListID<-paste(AnimalIDCurrent, as.character(FileIndex), sep="_")
       
       ThetaPlot<-ggplot(filter(DataframeVideoTimesAll, AnimalIDVariable==AnimalIDCurrent), aes(x=InitialisedTime, y=Theta, color=SleepWake))+geom_point()+xlim(AnimalIDVideoStartEnd[[ListID]])+ylim(0,80)+ggtitle(ListID)
